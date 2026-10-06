@@ -17,8 +17,11 @@ node dist/server.js --stdio
 The server handles documents whose language ID is `bend` or `bend2`. It
 preserves line breaks, blank lines, comments, literal spelling, line endings,
 and the final-newline state. Formatting normalizes indentation and safe token
-spacing without wrapping code. When a document cannot be tokenized safely, the
-server returns no edits.
+spacing without wrapping code. Declarations with inline block bodies, multiline
+`do` headers, or intermediate dedents are kept unchanged to preserve Bend's
+column-sensitive layout; neighbouring declarations are still formatted. Tabs
+count as one column, matching Bend's parser. When a document cannot be tokenized
+safely, the server returns no edits.
 
 ## Editor setup
 

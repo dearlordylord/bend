@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { formatBend } from "../formatter.js";
 
 const inlineLayouts = [
@@ -55,13 +56,75 @@ const inlineLayouts = [
   ].join("\n"),
 ];
 
+const columnRegressions = [
+  [
+    "import Base",
+    "def f(b: Bool, a: Array<U32>) -> Array<U32>:",
+    "  match b:",
+    "    case True{}: a[0] <- 7",
+    "                 a[1] <- 8",
+    "    case False{}: a",
+    "",
+  ].join("\n"),
+  [
+    "import Base",
+    "def f(a: Array<U32>) -> Array<U32>: a[0] <- 7",
+    "                                    a[1] <- 8",
+    "",
+  ].join("\n"),
+  [
+    "import Base",
+    "def main() -> IO(Unit):",
+    "  do IO<Unit>:",
+    '      IO.print(String.concat(["a",',
+    '    "c"]))',
+    '      IO.print("b")',
+    "",
+  ].join("\n"),
+  [
+    "import Base",
+    "def main() -> IO(Unit):",
+    "  do IO<Unit>:",
+    '\t\tIO.print("a")',
+    '  IO.print("b")',
+    "",
+  ].join("\n"),
+];
+
+const safeHeaderLayouts = [
+  "import Base\ndef f() -> Result<&2, &2, U32, U32>:\n    do Result<&2, &2, U32, U32>:\n        return 7\n",
+  "import Base\ndef f() -> IO(List<&2, U32>):\n    do IO<List<&2, U32>>:\n        IO.pure(List<&2, U32>, [1, 2])\n",
+  "import Base\ntype Client<-P: Type, -S: Type> is Type:\n  MkClient{p: P, s: S}\ndef f() -> IO(Client<Unit, Unit>):\n    do IO<Client<Unit, Unit>>:\n        IO.pure(Client<Unit, Unit>, MkClient{Unit{}, Unit{}})\n",
+  "import Base\ntype Box is Data:\n  Mk{v: U32}\ndef f() -> Box:\n    do Box<>:\n        Mk{3}\n",
+  "import Base\ndef main() -> IO(Unit):\n    do IO<(Unit : Type)>:\n        IO.print(\"a\")\n        IO.print(\"b\")\n",
+];
+
+test("preserves ambiguous columns while normalizing parser-equivalent tabs", () => {
+  for (const source of columnRegressions.slice(0, 3)) {
+    for (const options of [{}, { tabSize: 4 }, { insertSpaces: false }]) {
+      assert.equal(formatBend(source, options), source);
+    }
+  }
+  const source = columnRegressions[3];
+  const formatted = formatBend(source);
+  assert.equal(formatted, source.replace(/\t/g, " "));
+  assert.equal(formatBend(formatted), formatted);
+});
+
+test("formats valid complex do headers instead of preserving their declarations", () => {
+  for (const source of safeHeaderLayouts) {
+    const formatted = formatBend(source);
+    assert.notEqual(formatted, source);
+    assert.equal(formatBend(formatted), formatted);
+  }
+});
+
 test("leaves column-sensitive inline blocks unchanged", () => {
   const sources = [
     ...inlineLayouts,
     "def f(n: Bool) -> U32: match n: case True{}: 0\n                              case False{}: 1\n",
     "def main() -> IO(Unit):\n  do IO<Unit>: match flag:\n                 case True{}: IO.print(\"a\")\n                 case False{}: IO.print(\"b\")\n",
     "def main() -> IO(Unit):\n  do IO<Unit>: value: U32 <- get()\n               return value\n",
-    "import Base\ndef main() -> IO(Unit):\n  do IO<(Unit : Type)>:\n    IO.print(\"a\")\n    IO.print(\"b\")\n",
   ];
   for (const source of sources) {
     for (const text of [source, source.replace(/\n/g, "\r\n").trimEnd()]) {
@@ -78,20 +141,24 @@ test("inline layout guards ignore comments and literal contents", () => {
 });
 
 test("continues formatting do blocks whose first statement is on a new line", () => {
-  for (const header of ["IO<Unit>", "IO<U32>", "Effect.IO<Base.Unit>"]) {
+  for (const header of ["IO<Unit>", "IO<U32>", "Effect.IO<Base.Unit>", "Result<&2, &2, U32, U32>", "IO<List<&2, U32>>", "IO<Client<P, S>>", "Box<>", "IO<(Unit : Type)>", "IO<@x: Unit -> Unit>"]) {
     const source = `def main()->IO(Unit):\n    do ${header}: # first statement follows\n        IO.print("a")\n        IO.print("b")`;
     assert.equal(formatBend(source), `def main() -> IO(Unit):\n  do ${header}:  # first statement follows\n    IO.print("a")\n    IO.print("b")`);
   }
 });
 
-const bun = process.env.BEND_FMT_TEST_BUN;
-const compiler = process.env.BEND_FMT_TEST_COMPILER;
-test("inline blocks still check with the real Bend compiler", {
-  skip: !bun || !compiler ? "set BEND_FMT_TEST_BUN and BEND_FMT_TEST_COMPILER to absolute executable/source paths" : false,
+const bun = process.env.BEND_FMT_TEST_BUN
+  ?? ["bun", join(homedir(), ".bun/bin/bun")].find((candidate) =>
+    spawnSync(candidate, ["--version"]).status === 0);
+const compiler = process.env.BEND_FMT_TEST_COMPILER
+  ?? fileURLToPath(new URL("../../../../bend2/main.ts", import.meta.url));
+
+test("formatted layouts still check with the real Bend compiler", {
+  skip: !bun || !existsSync(compiler) ? "Bun or the Bend compiler is unavailable" : false,
 }, () => {
   const directory = mkdtempSync(join(tmpdir(), "bend-fmt-inline-"));
   try {
-    for (const [index, source] of inlineLayouts.entries()) {
+    for (const [index, source] of [...inlineLayouts, ...columnRegressions, ...safeHeaderLayouts].entries()) {
       const surrounded = source.replace("import Base\n", "import Base\ndef before()->U32:\n    0\n")
         + "\ndef after()->U32:\n    1\n";
       for (const [variant, text] of [source, formatBend(source), surrounded, formatBend(surrounded)].entries()) {
@@ -101,7 +168,7 @@ test("inline blocks still check with the real Bend compiler", {
           cwd: directory, encoding: "utf8", timeout: 30_000,
         });
         assert.equal(result.error, undefined);
-        assert.equal(result.status, 0, result.stdout + result.stderr);
+        assert.equal(result.status, 0, `fixture ${index}, variant ${variant}:\n` + result.stdout + result.stderr);
       }
     }
   } finally {
@@ -110,7 +177,7 @@ test("inline blocks still check with the real Bend compiler", {
 });
 
 test("preserves unsupported declarations while formatting their neighbours", () => {
-  for (const layout of inlineLayouts) {
+  for (const layout of [...inlineLayouts, ...columnRegressions.slice(0, 3)]) {
     for (const eol of ["\n", "\r\n"]) {
       const source = "def before()->U32:\n    0\n" + layout + "\ndef after()->U32:\n    1\n";
       const expected = "def before() -> U32:\n  0\n" + layout + "\ndef after() -> U32:\n  1\n";
