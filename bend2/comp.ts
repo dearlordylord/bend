@@ -238,6 +238,9 @@ const OPERATIONS: Record<string, Intr> = Object.setPrototypeOf({
     JS: "nat_divmod($0, $1)",
   },
   ...tpl_ops("bool_", "or:|:|| xor:^:!==", "(($0) $o ($1))", "($0 $o $1)"),
+  list_append: { JS: "list_append($0, $1)" },
+  list_concat: { JS: "list_concat($0)" },
+  string_concat: { JS: "string_concat($0)" },
   string_append: { JS: "($0 + $1)" },
   string_eq: { JS: "($0 === $1)" },
   string_cmp: { JS: "string_cmp($0, $1)" },
@@ -456,6 +459,43 @@ function u32_to_word(x) {
     w = {$: "WCon", head: ((x >>> i) & 1) === 1, tail: w};
   }
   return w;
+}
+
+// Collect before rebuilding: preserve spine reads, payloads and right-fold effects.
+function list_values(xs) {
+  const values = [];
+  while (xs.$ !== "Nil") {
+    values.push(xs.head);
+    xs = xs.tail;
+  }
+  return values;
+}
+
+function list_append(xs, ys) {
+  const values = list_values(xs);
+  for (let i = values.length - 1; i >= 0; i--) {
+    ys = {$: "Con", head: values[i], tail: ys};
+  }
+  return ys;
+}
+
+function list_concat(xs) {
+  const values = list_values(xs);
+  let result = {$: "Nil"};
+  for (let i = values.length - 1; i >= 0; i--) {
+    result = list_append(values[i], result);
+  }
+  return result;
+}
+
+function string_concat(xs) {
+  const values = list_values(xs);
+  let result = "";
+  for (let i = values.length - 1; i >= 0; i--) {
+    // Raw native tokens intentionally coerce here, right-to-left with +.
+    result = values[i] + result;
+  }
+  return result;
 }
 
 function cmp_new(a, b) {
