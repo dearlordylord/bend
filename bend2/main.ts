@@ -36,6 +36,7 @@ const VERSION = "2.0.36";
 const USAGE = [
   ["bend <file.bend> [args]", "check the file, then run main with args"],
   ["bend <file.bend> -o <out>", "build a binary, or C, JS, .mjs or BendTT by extension"],
+  ["bend <file.bend> -o <out>.mjs --js-opaque <type>", "add strict, opaque-state JS exports (repeat for each type)"],
   ["bend <file.bend> --check-only", "check the file and its imports; run nothing"],
   ["bend <file.bend> --verdict", "check it, then recheck it with the proven kernel"],
   ["bend <file.bend> --publish [<name>@<version>]", "publish the file and its imports; a name needs login"],
@@ -232,6 +233,7 @@ function ver_newer(ver: string): boolean {
 // cli_file checks, runs, builds, publishes or bundles a file
 async function cli_file(args: string[]): Promise<void> {
   const outs: string[] = [];
+  const opaque: string[] = [];
   const argv: string[] = [];
   let file: string | undefined;
   let only = false;
@@ -243,6 +245,11 @@ async function cli_file(args: string[]): Promise<void> {
     const a = args[i];
     if (a === "--help" || a === "-h") {
       return cli_say(1, HELP);
+    } else if (a === "--js-opaque") {
+      i += 1;
+      const name = args[i];
+      if (!name || name.startsWith("-")) cli_fail("--js-opaque needs a type name");
+      opaque.push(name);
     } else if (a === "--check-only") {
       only = true;
     } else if (a === "--verdict") {
@@ -272,6 +279,11 @@ async function cli_file(args: string[]): Promise<void> {
   if (file === undefined) {
     cli_say(1, HELP);
     process.exit(1);
+  }
+  if (opaque.length > 0 && (outs.length === 0
+    || outs.some((out) => !out.endsWith(".mjs"))
+    || only || verdict || checkup || publish || argv.length > 0)) {
+    cli_fail("--js-opaque requires only -o <out>.mjs");
   }
   if (file.endsWith(".html")) {
     if (outs.length !== 1 || only || checkup || publish) {
@@ -316,7 +328,7 @@ async function cli_file(args: string[]): Promise<void> {
       if (ins.has(at) || (fs.existsSync(at) && fs.statSync(at).isDirectory())) {
         cli_fail("-o " + out + " is a file the program reads, or a directory");
       }
-      cli_emit(book, out);
+      cli_emit(book, out, opaque);
     }
   } catch (e) {
     cli_say(2, book_err(e) + "\n");
@@ -359,9 +371,9 @@ function path_real(p: string): string {
   return fs.existsSync(p) ? fs.realpathSync(p) : path.resolve(p);
 }
 
-function cli_emit(book: Bend.Book, out: string): void {
+function cli_emit(book: Bend.Book, out: string, opaque: string[] = []): void {
   if (out.endsWith(".mjs")) {
-    fs.writeFileSync(out, Comp.js_lib(book, true));
+    fs.writeFileSync(out, Comp.js_lib(book, true, opaque));
   } else if (/\.c?js$/.test(out)) {
     fs.writeFileSync(out, Comp.js_book(book));
   } else if (out.endsWith(".c")) {

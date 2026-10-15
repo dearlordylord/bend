@@ -3208,9 +3208,113 @@ function js_host(k: Name): string {
     }(run_loop(${js_sat(k)}(${xs.join(", ")}))); ${back.join(" ")} return r; }`;
 }
 
+// Opt-in closed Data transport. Selected datatypes cross this boundary only as
+// module-local weakly branded tokens; ordinary records are detached in declared
+// field order, including nullary constructors. This never changes js_marshal.
+function js_opaque(names: string[], outs: Name[]): string {
+  const selected = new Set<Name>();
+  const maps = new Map<Name, string>();
+  const marsh = new Map<string, string>();
+  const data = (k: Name, xs: HTerm[] = []): boolean => {
+    const d = FL.book.tlds[k];
+    const t = d && ty_wnf(Bend.tele_fill(FL.book, d.T, xs, Bend.ctx_nil()));
+    return d?.$ === "ADT" && t?.$ === "Typ" && t.g.$ === "Qua"
+      && t.g.q.$ === "Many";
+  };
+  const closed = (A: HTerm | null, seen = new Set<string>()): boolean => {
+    const t = ty_wnf(A);
+    if (t?.$ !== "ADT" || t.k === "Array" || t.k === "IO.OP") {
+      return false;
+    }
+    if (OPTIMIZED[t.k] !== undefined) {
+      return true;
+    }
+    if (!data(t.k, t.x)) {
+      return false;
+    }
+    const key = Bend.term_key(Bend.term_lower(t));
+    if (seen.has(key)) {
+      return true;
+    }
+    seen.add(key);
+    const d = FL.book.tlds[t.k] as Bend.ADT;
+    return d.c.every((c) => ctr_live(c, t.x).every(([, , B]) =>
+      closed(B, seen)));
+  };
+  for (const name of names) {
+    const hits = Object.keys(FL.book.tlds).filter((k) =>
+      Bend.name_key(k) === name);
+    const k = hits[0];
+    const d = FL.book.tlds[k];
+    if (hits.length !== 1 || d?.$ !== "ADT" || d.n !== 0
+      || OPTIMIZED[k] !== undefined || !data(k)
+      || !closed(Bend.ADT(k, []))) {
+      throw new TypeError("bend: unsupported opaque Data type " + name);
+    }
+    selected.add(k);
+    maps.set(k, "$0opaque" + maps.size);
+  }
+  const convert = (A: HTerm | null, mode: "in" | "out" | "back"): string => {
+    const t = ty_adt(A)!;
+    const box = maps.get(t.k);
+    if (box !== undefined) {
+      return mode === "out" ? box + "_out" : mode === "in"
+        ? box + "_in" : box + "_back";
+    }
+    if (OPTIMIZED[t.k] !== undefined) {
+      return t.k === "Nat" ? mode === "in" ? "nat_host" : "BigInt"
+        : "((v) => v)";
+    }
+    const key = mode + " " + Bend.term_key(Bend.term_lower(t));
+    return memo(marsh, key, () => {
+      const name = "$0opaque_m" + marsh.size;
+      marsh.set(key, name);
+      const cs = (FL.book.tlds[t.k] as Bend.ADT).c;
+      const arms = cs.map((c) => {
+        const fs = ctr_live(c, t.x).map(([, n, B]) => [n, convert(B, mode)]);
+        const last = fs[fs.length - 1];
+        const tail = last?.[1] === name ? last[0] : undefined;
+        const copy = fs.filter(([n]) => n !== tail).map(([n, f]) =>
+          `Object.defineProperty(o, ${JSON.stringify(n)}, {value: ${f}($0opaque_field(v, ${
+            JSON.stringify(n)})), enumerable: true, writable: true, configurable: true});`).join(" ");
+        return `case ${JSON.stringify(Bend.name_key(c.k))}: { const o = {$: tag}; ${copy} at[key] = o; `
+          + (tail === undefined ? "return top[0];" : `at = o; key = ${JSON.stringify(tail)}; v = $0opaque_field(v, key); continue;`) + " }";
+      });
+      FL.spins.push({ ...seg_new("", BOX, ["v"]), lines: [
+        `function ${name}(v) { const top = [v]; for (let at = top, key = 0;;) {`,
+        'const tag = $0opaque_field(v, "$"); switch (tag) {', ...arms,
+        'default: throw new TypeError("bend: invalid closed Data constructor");',
+        "} } }", ""] });
+      return name;
+    });
+  };
+  const methods = outs.flatMap((k) => {
+    const { n, live } = fun_of(k);
+    const ret = Bend.tele_fill(FL.book, FL.book.tlds[k].T, Array(n).fill(DUMMY),
+      Bend.ctx_nil());
+    if (!live.every(([, , A]) => closed(A)) || !closed(ret)) {
+      return [];
+    }
+    const ps = live.map((_, i) => "a" + i);
+    const xs = live.map(([, , A], i) => `${convert(A, "in")}(${ps[i]})`);
+    const back = live.map(([, , A], i) => `${convert(A, "back")}(${ps[i]});`);
+    return [`  ${JSON.stringify(Bend.name_key(k))}: run_lib((${ps.join(", ")}) => { const r = ${
+      convert(ret, "out")}(run_loop(${js_sat(k)}(${xs.join(", ")}))); ${back.join(" ")} return r; }, ${
+      fun_of(k).lays.length}),`];
+  });
+  const brands = [...selected].map((k) => {
+    const b = maps.get(k)!;
+    return `const ${b}_raw = new WeakMap(), ${b}_tokens = new WeakMap();
+function ${b}_in(v) { if ((typeof v !== "object" && typeof v !== "function") || v === null || !${b}_raw.has(v)) throw new TypeError("bend: invalid opaque token"); return ${b}_raw.get(v); }
+function ${b}_back(v) { ${b}_in(v); return v; }
+function ${b}_out(v) { let t = ${b}_tokens.get(v); if (t === undefined) { t = Object.freeze(Object.create(null)); ${b}_tokens.set(v, t); ${b}_raw.set(t, v); } return t; }`;
+  }).join("\n");
+  return `\nfunction $0opaque_field(v, key) { if (typeof v !== "object" || v === null) throw new TypeError("bend: expected closed Data record"); const d = Object.getOwnPropertyDescriptor(v, key); if (!d || !("value" in d)) throw new TypeError("bend: expected own Data field " + key); return d.value; }\n${brands}\nexport const opaque = {\n${methods.join("\n")}\n};\n`;
+}
+
 // A module (for the .bend loader and -o <out>.mjs) roots and exports each
 // def a host can call.
-export function js_lib(book: Bend.Book, mod = false): string {
+export function js_lib(book: Bend.Book, mod = false, opaque: string[] = []): string {
   FL = file_new(book, true);
   const outs = !mod ? null : [...new Set(FL.book.order)].filter((k) => {
     const t = FL.book.tlds[k];
@@ -3228,6 +3332,7 @@ export function js_lib(book: Bend.Book, mod = false): string {
   const lib = outs === null ? "" : `export default {\n${outs.map((k) =>
     `  "${Bend.name_key(k)}": run_lib(${js_host(k)}, ${
       fun_of(k).lays.length}),`).join("\n")}\n};\n`;
+  const extra = opaque.length === 0 ? "" : js_opaque(opaque, outs ?? []);
   const jmps = new Map<Name, boolean>();
   const jmp = (k: Name): boolean => k === CLO_APPLY || memo(jmps, k, () =>
     (jmps.set(k, true), [...FL.tails.get(k) ?? []].some(jmp)));
@@ -3235,7 +3340,7 @@ export function js_lib(book: Bend.Book, mod = false): string {
     .join("\n").replace(/\x01([^\x02]*)\x02/g, (_, k) => jmp(k) ? "run_loop"
       : "");
   return RUNTIME + effs + "// Program\n// =======\n\n" + [funs, ...[...FL.tabs]
-    .map(([r, i]) => `const TAB_${i} = [${r}];`)].join("\n") + lib;
+    .map(([r, i]) => `const TAB_${i} = [${r}];`)].join("\n") + lib + extra;
 }
 
 export function js_book(book: Bend.Book): string {
