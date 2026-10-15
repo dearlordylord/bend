@@ -240,6 +240,7 @@ const OPERATIONS: Record<string, Intr> = Object.setPrototypeOf({
   ...tpl_ops("bool_", "or:|:|| xor:^:!==", "(($0) $o ($1))", "($0 $o $1)"),
   string_append: { JS: "($0 + $1)" },
   string_eq: { JS: "($0 === $1)" },
+  string_cmp: { JS: "string_cmp($0, $1)" },
   string_length: { JS: "[...$0].length" },
   ...Object.fromEntries(Object.entries({
     new: "array_new($0, $1)", set: "($0[$1 % $0.length] = $2, $0)",
@@ -458,6 +459,27 @@ function u32_to_word(x) {
 function cmp_new(a, b) {
   return {$: a < b ? "LT"
     : a === b ? "EQ" : "GT"};
+}
+
+// Base String.cmp compares code points and returns both strings unchanged.
+// JS relational string comparison uses UTF-16 units, so it is not equivalent.
+function string_cmp(a, b) {
+  let i = 0, j = 0, order = cmp_new(0, 0);
+  if (a !== b) {
+    while (i < a.length && j < b.length) {
+      const x = a.codePointAt(i), y = b.codePointAt(j);
+      if (x !== y) {
+        order = cmp_new(x, y);
+        break;
+      }
+      i += x > 65535 ? 2 : 1;
+      j += y > 65535 ? 2 : 1;
+    }
+    if (i === a.length || j === b.length) {
+      order = cmp_new(a.length - i, b.length - j);
+    }
+  }
+  return {$: "Tuple", fst: {$: "Tuple", fst: a, snd: b}, snd: order};
 }
 
 function nat_divmod(a, b) {
