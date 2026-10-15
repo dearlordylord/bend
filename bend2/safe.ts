@@ -125,7 +125,7 @@ type Safe = {
   out: Array<[string, O, O, boolean]>;
   names: Map<string, string>;
   seen: Set<string>;
-  todo: Array<[Name, Cols]>;
+  todo: Array<[Name, Cols, string]>;
   taken: Set<string>;
   fail: Map<string, string>;
   groups: Map<Name, Group>;
@@ -216,7 +216,10 @@ function safe_pass(book: Book, groups: Map<Name, Group>, inst: Safe["inst"]): { 
     }
   }
   for (let it = e.todo.pop(); it !== undefined; it = e.todo.pop()) {
-    item_try(e, it[0], it[1]);
+    if (process.env.BEND_TT_ASSERT_PENDING_KEYS === "1" && it[2] !== item_key(it[0], it[1])) {
+      throw new Error("BendTT: a pending specialization key changed");
+    }
+    item_try(e, it[0], it[1], it[2]);
   }
   if (e.grew || groups.size > g0 && [...e.names.keys()].some((key) => key[0] !== "\t" && groups.has(key.split("\n")[0]))) {
     return null;
@@ -283,9 +286,9 @@ function root_cols(e: Safe, k: Name, T: HTerm, j: number): Cols[] {
 }
 
 // item_ref, with a failure kept as the item's reason
-function item_try(e: Safe, k: Name, cols: Cols): string {
+function item_try(e: Safe, k: Name, cols: Cols, key?: string): string {
   try {
-    return item_ref(e, k, cols, true);
+    return item_ref(e, k, cols, true, key);
   } catch (x) {
     if (x instanceof Reroute) {
       return item_try(e, k, cols);
@@ -309,15 +312,16 @@ function item_key(k: Name, cols: Cols): string {
 // the kernel name of book name k at cols: a Quant literal names itself;
 // a live name goes out now (before its caller), a dead one later. A live
 // name still going out (not its own) closes a live cycle: a group
-function item_ref(e: Safe, k: Name, cols: Cols, live: boolean): string {
-  const key = item_key(k, cols);
+function item_ref(e: Safe, k: Name, cols: Cols, live: boolean, key = item_key(k, cols)): string {
   const m = live && !e.seen.has(key) ? trail(e) : null;
   let n = e.names.get(key);
   if (n === undefined) {
     const tag = cols.flatMap((v) => v === null ? [] : [v.$ === "Qua" ? String(quant(v.q)) : "v"]).join("");
     n = fresh(e, name_tt(k[0] === "\t" ? k.slice(1) + ".group" : k) + (tag !== "" ? ".q" + tag : ""));
     e.names.set(key, n);
-    e.todo.push([k, cols]);
+    // Reuse only this checked, closed pending specialization's key in this pass.
+    // Reroute and Scope_Error still recompute through item_try's original paths.
+    e.todo.push([k, cols, key]);
   }
   const why = e.fail.get(n);
   if (why !== undefined && live) {
