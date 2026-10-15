@@ -16,3 +16,16 @@ io_eff(CID(count), count);
 io_eff(CID(left), left);
 io_eff(CID(right), right);
 io_eff(CID(position), position);
+
+function once_check(bit, diff) {
+  const trace = [];
+  const key = () => { trace.push("key"); return "\u{10000}"; };
+  const pos = () => { trace.push("pos"); return 16; };
+  const a = () => { trace.push("left"); return "\u{10000}"; };
+  const b = () => { trace.push("right"); return "\uE000"; };
+  const result = bit(key)(pos);
+  const distance = diff(a)(b);
+  return trace.join(",") === "key,pos,left,right"
+    && result.fst === "\u{10000}" && result.snd === true && distance === 16;
+}
+io_eff(CID(once_check), once_check);

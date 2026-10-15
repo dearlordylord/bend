@@ -13,6 +13,16 @@ def right(index: Nat) -> IO(String):
 def position(index: Nat) -> IO(Nat):
   import "./map_keys_intrinsic.js"
 
+def once_check(bit: (Unit -> String) -> (Unit -> Nat) -> String & Bool,
+  diff: (Unit -> String) -> (Unit -> String) -> Nat) -> IO(Bool):
+  import "./map_keys_intrinsic.js"
+
+def bit_once(key: Unit -> String, pos: Unit -> Nat) -> String & Bool:
+  Map.bit(key(Unit{}), pos(Unit{}))
+
+def diff_once(a: Unit -> String, b: Unit -> String) -> Nat:
+  Map.diff(a(Unit{}), b(Unit{}))
+
 def ref_bit.u(x: U32, k: Nat) -> Bool:
   U32.is_ne(U32.and(U32.shrn(x, k), 1), 0)
 
@@ -106,6 +116,70 @@ def template_diff(~f: String -> String -> Nat, a: String, b: String) -> Nat:
 def indirect_diff(f: String -> String -> Nat, a: String, b: String) -> Nat:
   f(a, b)
 
+def same_map(a: Map<&2, Nat>, b: Map<&2, Nat>) -> Bool:
+  match a b:
+    case MTip{} MTip{}: True{}
+    case MLeaf{k, v} MLeaf{j, w}:
+      Bool.and(String.eq(k, j), Nat.is_eq(v, w))
+    case MNode{p, lo, hi} MNode{q, low, high}:
+      Bool.and(Nat.is_eq(p, q), Bool.and(same_map(lo, low), same_map(hi, high)))
+    case _ _: False{}
+
+def expected_branch(+a: String, b: String, va: Nat, vb: Nat, p: Nat, bit: String & Bool) -> Map<&2, Nat>:
+  (_, high) = bit
+  match high:
+    case True{}: MNode{p, MLeaf{b, vb}, MLeaf{a, va}}
+    case False{}: MNode{p, MLeaf{a, va}, MLeaf{b, vb}}
+
+def expected_pair(same: Bool, +a: String, +b: String, va: Nat, +vb: Nat) -> Map<&2, Nat>:
+  match same:
+    case True{}: MLeaf{b, vb}
+    case False{}:
+      +p = ref_diff(a, b)
+      expected_branch(a, b, va, vb, p, ref_bit(a, p))
+
+def get_exact(expected: Map<&2, Nat>, value: Nat, actual: Map<&2, Nat> & Nat) -> Bool:
+  (map, got) = actual
+  Bool.and(same_map(expected, map), Nat.is_eq(value, got))
+
+def has_exact(expected: Map<&2, Nat>, value: Bool, actual: Map<&2, Nat> & Bool) -> Bool:
+  (map, got) = actual
+  Bool.and(same_map(expected, map), Bool.not(Bool.xor(value, got)))
+
+def maybe_exact(value: Nat, actual: Maybe<&2, Nat>) -> Bool:
+  match actual:
+    case Some{got}: Nat.is_eq(value, got)
+    case None{}: False{}
+
+def pop_exact(expected: Map<&2, Nat>, value: Nat, actual: Map<&2, Nat> & Maybe<&2, Nat>) -> Bool:
+  (map, got) = actual
+  Bool.and(same_map(expected, map), maybe_exact(value, got))
+
+def pop_miss(expected: Map<&2, Nat>, actual: Map<&2, Nat> & Maybe<&2, Nat>) -> Bool:
+  (map, got) = actual
+  match got:
+    case None{}: same_map(expected, map)
+    case Some{_}: False{}
+
+def maps(+a: String, +b: String) -> Bool:
+  +same = String.eq(a, b)
+  +value_a = Bool.pick(Nat, same, 22n, 11n)
+  +expected = expected_pair(same, a, b, 11n, 22n)
+  +map = Map.set(&2, Nat, Map.set(&2, Nat, MTip{}, a, 11n), b, 22n)
+  +missing = String.append(String.append(a, b), "\0missing")
+  +reversed = Map.set(&2, Nat, Map.set(&2, Nat, MTip{}, b, 22n), a, value_a)
+  Bool.and(same_map(expected, map),
+    Bool.and(same_map(expected, reversed),
+      Bool.and(same_map(expected_pair(same, a, b, 77n, 77n),
+          Map.set(&2, Nat, Map.set(&2, Nat, map, a, 77n), b, 77n)),
+        Bool.and(get_exact(expected, value_a, Map.get(Nat, 99n, map, a)),
+          Bool.and(get_exact(expected, 99n, Map.get(Nat, 99n, map, missing)),
+            Bool.and(has_exact(expected, True{}, Map.has(&2, Nat, map, b)),
+              Bool.and(has_exact(expected, False{}, Map.has(&2, Nat, map, missing)),
+                Bool.and(pop_exact(Bool.pick(Map<&2, Nat>, same, MTip{}, MLeaf{b, 22n}),
+                    value_a, Map.pop(&2, Nat, map, a)),
+                  pop_miss(expected, Map.pop(&2, Nat, map, missing))))))))))
+
 def agrees(+a: String, +b: String, +pos: Nat) -> Bool:
   +expected = ref_diff(a, b)
   Bool.and(same_bit(ref_bit(a, pos), Map.bit(a, pos)),
@@ -127,16 +201,17 @@ def run(remaining: Nat, +index: Nat) -> IO(Nat):
     case 0n: IO.pure(Nat, 0n)
     case 1n++remaining:
       do IO<Nat>:
-        a: String <- left(index)
-        b: String <- right(index)
+        +a: String <- left(index)
+        +b: String <- right(index)
         pos: Nat <- position(index)
         rest: Nat <- run(remaining, (index + 1n : Nat))
-        return (score(agrees(a, b, pos)) + rest : Nat)
+        return (score(Bool.and(agrees(a, b, pos), maps(a, b))) + rest : Nat)
 
 def main() -> IO(Unit):
   do IO<Unit>:
     n: Nat <- count()
     failures: Nat <- run(n, 0n)
-    IO.print(Nat.show(failures))
+    once: Bool <- once_check(bit_once, diff_once)
+    IO.print(Nat.show((failures + score(once) : Nat)))
 
 #|0
