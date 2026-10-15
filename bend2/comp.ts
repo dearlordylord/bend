@@ -241,6 +241,8 @@ const OPERATIONS: Record<string, Intr> = Object.setPrototypeOf({
   string_append: { JS: "($0 + $1)" },
   string_eq: { JS: "($0 === $1)" },
   string_cmp: { JS: "string_cmp($0, $1)" },
+  map_bit: { JS: "map_bit($0, $1)" },
+  map_diff: { JS: "map_diff($0, $1)" },
   string_length: { JS: "[...$0].length" },
   ...Object.fromEntries(Object.entries({
     new: "array_new($0, $1)", set: "($0[$1 % $0.length] = $2, $0)",
@@ -480,6 +482,30 @@ function string_cmp(a, b) {
     }
   }
   return {$: "Tuple", fst: {$: "Tuple", fst: a, snd: b}, snd: order};
+}
+
+// Base Map routes keys by a presence bit followed by 32 code-point bits.
+function map_bit(key, pos) {
+  const ci = Math.trunc(pos / 33), off = pos % 33;
+  let at = 0;
+  for (let n = 0; n < ci && at < key.length; n++) {
+    at += key.codePointAt(at) > 65535 ? 2 : 1;
+  }
+  const bit = at < key.length
+    && (off === 0 || ((key.codePointAt(at) >>> (32 - off)) & 1) !== 0);
+  return {$: "Tuple", fst: key, snd: bit};
+}
+
+function map_diff(a, b) {
+  let i = 0, j = 0, pos = 0;
+  while (i < a.length && j < b.length) {
+    const x = a.codePointAt(i), y = b.codePointAt(j);
+    if (x !== y) return pos + 1 + Math.clz32(x ^ y);
+    pos += 33;
+    i += x > 65535 ? 2 : 1;
+    j += y > 65535 ? 2 : 1;
+  }
+  return pos;
 }
 
 function nat_divmod(a, b) {
